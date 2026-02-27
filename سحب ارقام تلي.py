@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = "7087088730:AAGuiJOguuFn4_F1xXZpAsskrhlaeTmIFWs"
 OWNER_CHAT_ID = 7828957324  # ضع معرف المالك هنا
 
-# حالة المحادثة (للتأكد من أننا في خطوة طلب الرقم)
+# حالة المحادثة (للتأد من أننا في خطوة طلب الرقم)
 ASK_PHONE = 1
 
 # إعداد تسجيل الأخطاء
