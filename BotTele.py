@@ -1,9 +1,9 @@
 import os
 import json
-import base64
 import asyncio
 import logging
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
+from datetime import datetime
 
 from cryptography.fernet import Fernet
 
@@ -27,7 +27,7 @@ from pyrogram.errors import (
     PhoneCodeExpired,
 )
 
-# إعداد التسجيل (logging)
+# إعداد التسجيل
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -83,18 +83,26 @@ def save_sessions(sessions: Dict[int, Dict[str, Any]]) -> None:
 # تحميل الجلسات عند بدء التشغيل
 user_sessions = load_sessions()
 
+# قاموس لتخزين مهام النشر التلقائي لكل مستخدم
+auto_post_tasks: Dict[int, asyncio.Task] = {}
+
 # ==================== حالات المحادثة ====================
 (
     MAIN_MENU,
     CHANNEL_SECTION,
     LIST_CHANNELS,
     LIST_GROUPS,
+    AUTO_POST_MENU,
+    AUTO_POST_SET_GROUPS,
+    AUTO_POST_SET_MESSAGE,
+    AUTO_POST_SET_INTERVAL,
+    AUTO_POST_CONFIRM,
     AWAITING_API_ID,
     AWAITING_API_HASH,
     AWAITING_PHONE,
     AWAITING_CODE,
     AWAITING_PASSWORD,
-) = range(9)
+) = range(14)
 
 # تخزين مؤقت لبيانات الدخول
 login_data: Dict[int, dict] = {}
@@ -138,7 +146,7 @@ async def validate_session(session_string: str, api_id: int, api_hash: str) -> b
 # دوال مساعدة للقوائم
 async def remove_chat_from_list(context, chat_id: int):
     """إزالة دردشة من القوائم المخزنة في context"""
-    for lst_name in ["channels_list", "groups_list"]:
+    for lst_name in ["channels_list", "groups_list", "auto_groups_list"]:
         lst = context.user_data.get(lst_name, [])
         context.user_data[lst_name] = [item for item in lst if item[0] != chat_id]
 
@@ -151,16 +159,80 @@ async def refresh_current_list(update: Update, context):
     elif "groups_list" in context.user_data:
         await show_groups_page(update, context)
         return LIST_GROUPS
+    elif "auto_groups_list" in context.user_data:
+        await show_auto_groups_page(update, context)
+        return AUTO_POST_SET_GROUPS
     else:
         await query.edit_message_text(
-            "العودة للقسم", reply_markup=channel_section_keyboard()
+            "العودة للقسم", reply_markup=main_menu_keyboard()
         )
-        return CHANNEL_SECTION
+        return MAIN_MENU
+
+# دوال النشر التلقائي
+async def auto_post_worker(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """مهمة خلفية لإرسال الرسائل بشكل دوري"""
+    logger.info(f"بدء النشر التلقائي للمستخدم {user_id}")
+    while True:
+        user_data = get_user_session_data(user_id)
+        if not user_data:
+            logger.warning(f"المستخدم {user_id} ليس لديه جلسة، إيقاف النشر")
+            break
+
+        auto_settings = user_data.get("auto_post")
+        if not auto_settings or not auto_settings.get("enabled"):
+            logger.info(f"النشر التلقائي للمستخدم {user_id} معطل")
+            break
+
+        groups = auto_settings.get("groups", [])
+        message = auto_settings.get("message")
+        interval = auto_settings.get("interval", 60)
+
+        if not groups or not message:
+            logger.warning(f"إعدادات غير مكتملة للمستخدم {user_id}")
+            break
+
+        api_id = user_data["api_id"]
+        api_hash = user_data["api_hash"]
+        session_str = user_data["session"]
+
+        client = await create_pyrogram_client(api_id, api_hash, session_str)
+        try:
+            await client.connect()
+            for chat_id in groups:
+                try:
+                    await client.send_message(chat_id, message)
+                    logger.info(f"تم إرسال رسالة إلى {chat_id}")
+                except RPCError as e:
+                    logger.error(f"فشل إرسال الرسالة إلى {chat_id}: {e}")
+                # انتظار بين الرسائل داخل نفس الدورة (إذا أردت)
+                await asyncio.sleep(2)  # مهلة قصيرة بين الرسائل
+        except Exception as e:
+            logger.error(f"خطأ في عميل pyrogram: {e}")
+        finally:
+            await client.disconnect()
+
+        # انتظار الفاصل الزمني المحدد قبل الدورة التالية
+        await asyncio.sleep(interval)
+
+def stop_auto_post(user_id: int):
+    """إيقاف مهمة النشر التلقائي لمستخدم"""
+    task = auto_post_tasks.pop(user_id, None)
+    if task:
+        task.cancel()
+        logger.info(f"تم إلغاء مهمة النشر للمستخدم {user_id}")
+
+def start_auto_post(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """بدء مهمة النشر التلقائي لمستخدم (إذا كانت مفعلة)"""
+    stop_auto_post(user_id)  # إلغاء أي مهمة سابقة
+    task = asyncio.create_task(auto_post_worker(user_id, context))
+    auto_post_tasks[user_id] = task
+    logger.info(f"تم بدء مهمة النشر للمستخدم {user_id}")
 
 # ==================== لوحات المفاتيح ====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("🚪 إدارة المغادرة (القنوات والجروبات)", callback_data="channel_section")],
+        [InlineKeyboardButton("🚪 إدارة المغادرة", callback_data="channel_section")],
+        [InlineKeyboardButton("📢 النشر التلقائي", callback_data="auto_post_menu")],
         [InlineKeyboardButton("ℹ️ معلومات الحساب", callback_data="account_info")],
         [InlineKeyboardButton("🔐 تسجيل الخروج", callback_data="logout")],
     ]
@@ -170,10 +242,34 @@ def channel_section_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📢 مغادرة كل القنوات", callback_data="leave_all_channels")],
         [InlineKeyboardButton("👥 مغادرة كل الجروبات", callback_data="leave_all_groups")],
-        [InlineKeyboardButton("📋 عرض القنوات لمغادرة محددة", callback_data="list_channels")],
-        [InlineKeyboardButton("🗂 عرض الجروبات لمغادرة محددة", callback_data="list_groups")],
+        [InlineKeyboardButton("📋 عرض القنوات", callback_data="list_channels")],
+        [InlineKeyboardButton("🗂 عرض الجروبات", callback_data="list_groups")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")],
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def auto_post_menu_keyboard(user_data) -> InlineKeyboardMarkup:
+    """لوحة مفاتيح قسم النشر التلقائي حسب حالة الإعدادات"""
+    auto = user_data.get("auto_post", {})
+    enabled = auto.get("enabled", False)
+    groups_count = len(auto.get("groups", []))
+    msg_preview = auto.get("message", "غير محددة")[:20] + "..." if auto.get("message") else "غير محددة"
+    interval = auto.get("interval", 60)
+
+    status = "🟢 مفعل" if enabled else "🔴 متوقف"
+    text = f"الحالة: {status}\nالمجموعات: {groups_count}\nالرسالة: {msg_preview}\nالفاصل: {interval} ثانية"
+
+    keyboard = [
+        [InlineKeyboardButton("📋 اختيار المجموعات", callback_data="auto_set_groups")],
+        [InlineKeyboardButton("✏️ كتابة الرسالة", callback_data="auto_set_message")],
+        [InlineKeyboardButton("⏱ ضبط الفاصل الزمني", callback_data="auto_set_interval")],
+    ]
+    if enabled:
+        keyboard.append([InlineKeyboardButton("⏸ إيقاف النشر", callback_data="auto_stop")])
+    else:
+        if groups_count > 0 and auto.get("message"):
+            keyboard.append([InlineKeyboardButton("▶️ بدء النشر", callback_data="auto_start")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")])
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== بداية المحادثة / تسجيل الدخول ====================
@@ -320,6 +416,12 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, use
             "first_name": me.first_name,
             "username": me.username,
             "phone": me.phone_number,
+            "auto_post": {
+                "enabled": False,
+                "groups": [],
+                "message": None,
+                "interval": 60
+            }
         }
         save_sessions(user_sessions)
 
@@ -349,6 +451,18 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return CHANNEL_SECTION
 
+    elif query.data == "auto_post_menu":
+        user_data = get_user_session_data(user_id)
+        if not user_data:
+            await query.edit_message_text("لم يتم العثور على جلسة. أرسل /start مرة أخرى.")
+            return ConversationHandler.END
+
+        await query.edit_message_text(
+            "إعدادات النشر التلقائي:",
+            reply_markup=auto_post_menu_keyboard(user_data)
+        )
+        return AUTO_POST_MENU
+
     elif query.data == "account_info":
         user_data = get_user_session_data(user_id)
         if not user_data:
@@ -363,6 +477,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return MAIN_MENU
 
     elif query.data == "logout":
+        # إيقاف النشر التلقائي إن كان مفعلًا
+        stop_auto_post(user_id)
         user_sessions.pop(user_id, None)
         save_sessions(user_sessions)
         await query.edit_message_text("تم تسجيل الخروج. أرسل /start للدخول مجدداً.")
@@ -370,7 +486,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     return MAIN_MENU
 
-# ==================== قسم إدارة المغادرة ====================
+# ==================== قسم إدارة المغادرة (مثل السابق) ====================
+# (نفس الكود السابق، مختصر هنا للاختصار، لكنه موجود في الكود الكامل)
 async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -478,7 +595,7 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
 
     return CHANNEL_SECTION
 
-# ==================== عرض القوائم مع الترقيم ====================
+# دوال عرض القنوات والجروبات (نفس السابق)
 async def show_channels_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     channels = context.user_data.get("channels_list", [])
@@ -541,7 +658,6 @@ async def show_groups_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# ==================== معالج التنقل والمغادرة المحددة ====================
 async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -574,7 +690,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # معالجة طلب المغادرة
     if data.startswith("leave_chat:"):
-        # استخراج معرف الدردشة
         chat_id_str = data.split(":")[1]
         try:
             chat_id = int(chat_id_str)
@@ -592,7 +707,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
             await client.connect()
             logger.info(f"محاولة مغادرة الدردشة: {chat_id}")
 
-            # تحقق أولاً إذا كنا لا نزال عضوًا (اختياري)
             try:
                 chat = await client.get_chat(chat_id)
                 if not chat:
@@ -603,7 +717,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
                 await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة (أو تم حذفها). تمت إزالتها من القائمة.")
                 return await refresh_current_list(update, context)
 
-            # محاولة المغادرة
             await client.leave_chat(chat_id)
             logger.info(f"تمت المغادرة بنجاح من {chat_id}")
 
@@ -613,7 +726,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         except RPCError as e:
             logger.error(f"خطأ RPC أثناء مغادرة {chat_id}: {e}")
             error_msg = str(e)
-
             if "USER_NOT_PARTICIPANT" in error_msg:
                 await remove_chat_from_list(context, chat_id)
                 await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة. تمت إزالتها من القائمة.")
@@ -638,6 +750,218 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
 
     return CHANNEL_SECTION
 
+# ==================== قسم النشر التلقائي ====================
+async def auto_post_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    user_data = get_user_session_data(user_id)
+    if not user_data:
+        await query.edit_message_text("الجلسة غير موجودة. أرسل /start.")
+        return ConversationHandler.END
+
+    data = query.data
+
+    if data == "auto_set_groups":
+        # تحميل قائمة الجروبات من الحساب
+        session_str = user_data["session"]
+        api_id = user_data["api_id"]
+        api_hash = user_data["api_hash"]
+        client = await create_pyrogram_client(api_id, api_hash, session_str)
+
+        await query.edit_message_text("جاري تحميل الجروبات...")
+        try:
+            await client.connect()
+            groups = []
+            async for dialog in client.get_dialogs():
+                if dialog.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+                    groups.append((dialog.chat.id, dialog.chat.title or "بدون عنوان"))
+            context.user_data["auto_groups_list"] = groups
+            context.user_data["auto_groups_page"] = 0
+            # تحديد أي منها محدد مسبقاً (إن وجد)
+            selected = set(user_data.get("auto_post", {}).get("groups", []))
+            context.user_data["auto_selected_groups"] = selected
+            await show_auto_groups_page(update, context)
+        except Exception as e:
+            logger.error(f"خطأ في تحميل الجروبات: {e}")
+            await query.edit_message_text(f"حدث خطأ: {e}", reply_markup=auto_post_menu_keyboard(user_data))
+        finally:
+            await client.disconnect()
+        return AUTO_POST_SET_GROUPS
+
+    elif data == "auto_set_message":
+        await query.edit_message_text(
+            "أرسل الرسالة التي تريد نشرها (يمكنك استخدام Markdown):\n"
+            "لإلغاء الأمر أرسل /cancel"
+        )
+        return AUTO_POST_SET_MESSAGE
+
+    elif data == "auto_set_interval":
+        await query.edit_message_text(
+            "أرسل الفاصل الزمني بين كل رسالة (بالثواني، رقم فقط):\n"
+            "لإلغاء الأمر أرسل /cancel"
+        )
+        return AUTO_POST_SET_INTERVAL
+
+    elif data == "auto_start":
+        auto = user_data.get("auto_post", {})
+        if auto.get("enabled"):
+            await query.edit_message_text("النشر مفعل بالفعل.")
+        else:
+            if not auto.get("groups") or not auto.get("message"):
+                await query.edit_message_text("⚠️ يجب تحديد المجموعات والرسالة أولاً.")
+            else:
+                user_data["auto_post"]["enabled"] = True
+                save_sessions(user_sessions)
+                start_auto_post(user_id, context)
+                await query.edit_message_text("✅ تم بدء النشر التلقائي.", reply_markup=auto_post_menu_keyboard(user_data))
+        return AUTO_POST_MENU
+
+    elif data == "auto_stop":
+        user_data["auto_post"]["enabled"] = False
+        save_sessions(user_sessions)
+        stop_auto_post(user_id)
+        await query.edit_message_text("⏸ تم إيقاف النشر التلقائي.", reply_markup=auto_post_menu_keyboard(user_data))
+        return AUTO_POST_MENU
+
+    elif data == "back_to_main":
+        await query.edit_message_text("القائمة الرئيسية:", reply_markup=main_menu_keyboard())
+        return MAIN_MENU
+
+    return AUTO_POST_MENU
+
+async def show_auto_groups_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض قائمة الجروبات مع إمكانية اختيار متعدد"""
+    query = update.callback_query
+    groups = context.user_data.get("auto_groups_list", [])
+    page = context.user_data.get("auto_groups_page", 0)
+    selected = context.user_data.get("auto_selected_groups", set())
+    items_per_page = 8
+    total_pages = (len(groups) + items_per_page - 1) // items_per_page
+
+    start = page * items_per_page
+    end = start + items_per_page
+    page_groups = groups[start:end]
+
+    keyboard = []
+    for chat_id, title in page_groups:
+        # علامة ✓ إذا كانت محددة
+        mark = "✅ " if chat_id in selected else ""
+        btn_text = f"{mark}{title[:25]}..." if len(title) > 25 else f"{mark}{title}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"auto_toggle_group:{chat_id}")])
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data="auto_groups_page_prev"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data="auto_groups_page_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    keyboard.append([InlineKeyboardButton("✅ حفظ التحديد", callback_data="auto_save_groups")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="auto_back_to_menu")])
+
+    await query.edit_message_text(
+        f"اختر المجموعات (صفحة {page+1}/{total_pages}):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """معالج اختيار المجموعات للنشر التلقائي"""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "auto_groups_page_next":
+        context.user_data["auto_groups_page"] = context.user_data.get("auto_groups_page", 0) + 1
+        await show_auto_groups_page(update, context)
+        return AUTO_POST_SET_GROUPS
+
+    elif data == "auto_groups_page_prev":
+        context.user_data["auto_groups_page"] = context.user_data.get("auto_groups_page", 0) - 1
+        await show_auto_groups_page(update, context)
+        return AUTO_POST_SET_GROUPS
+
+    elif data.startswith("auto_toggle_group:"):
+        chat_id = int(data.split(":")[1])
+        selected = context.user_data.get("auto_selected_groups", set())
+        if chat_id in selected:
+            selected.remove(chat_id)
+        else:
+            selected.add(chat_id)
+        context.user_data["auto_selected_groups"] = selected
+        await show_auto_groups_page(update, context)
+        return AUTO_POST_SET_GROUPS
+
+    elif data == "auto_save_groups":
+        user_id = update.effective_user.id
+        selected = context.user_data.get("auto_selected_groups", set())
+        # تحديث بيانات المستخدم
+        user_data = get_user_session_data(user_id)
+        if user_data:
+            if "auto_post" not in user_data:
+                user_data["auto_post"] = {}
+            user_data["auto_post"]["groups"] = list(selected)
+            user_data["auto_post"]["enabled"] = False  # نوقف النشر عند تغيير المجموعات
+            save_sessions(user_sessions)
+            stop_auto_post(user_id)
+        await query.edit_message_text("✅ تم حفظ المجموعات.", reply_markup=auto_post_menu_keyboard(user_data))
+        return AUTO_POST_MENU
+
+    elif data == "auto_back_to_menu":
+        user_id = update.effective_user.id
+        user_data = get_user_session_data(user_id)
+        await query.edit_message_text("إعدادات النشر التلقائي:", reply_markup=auto_post_menu_keyboard(user_data))
+        return AUTO_POST_MENU
+
+    return AUTO_POST_SET_GROUPS
+
+async def auto_set_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استقبال رسالة النشر"""
+    user_id = update.effective_user.id
+    message = update.message.text
+
+    user_data = get_user_session_data(user_id)
+    if user_data:
+        if "auto_post" not in user_data:
+            user_data["auto_post"] = {}
+        user_data["auto_post"]["message"] = message
+        user_data["auto_post"]["enabled"] = False  # نوقف النشر عند تغيير الرسالة
+        save_sessions(user_sessions)
+        stop_auto_post(user_id)
+
+    await update.message.reply_text("✅ تم حفظ الرسالة.", reply_markup=auto_post_menu_keyboard(user_data))
+    return AUTO_POST_MENU
+
+async def auto_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استقبال الفاصل الزمني"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if not text.isdigit():
+        await update.message.reply_text("الرجاء إدخال رقم صحيح (بالثواني):")
+        return AUTO_POST_SET_INTERVAL
+
+    interval = int(text)
+    if interval < 5:
+        await update.message.reply_text("يجب أن يكون الفاصل 5 ثوانٍ على الأقل.")
+        return AUTO_POST_SET_INTERVAL
+
+    user_data = get_user_session_data(user_id)
+    if user_data:
+        if "auto_post" not in user_data:
+            user_data["auto_post"] = {}
+        user_data["auto_post"]["interval"] = interval
+        user_data["auto_post"]["enabled"] = False
+        save_sessions(user_sessions)
+        stop_auto_post(user_id)
+
+    await update.message.reply_text("✅ تم حفظ الفاصل الزمني.", reply_markup=auto_post_menu_keyboard(user_data))
+    return AUTO_POST_MENU
+
+# ==================== معالج الإلغاء ====================
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     login_data.pop(user_id, None)
@@ -659,10 +983,14 @@ def main() -> None:
             AWAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)],
             AWAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_code)],
             AWAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
-            MAIN_MENU: [CallbackQueryHandler(main_menu_handler, pattern="^(channel_section|account_info|logout)$")],
+            MAIN_MENU: [CallbackQueryHandler(main_menu_handler, pattern="^(channel_section|auto_post_menu|account_info|logout)$")],
             CHANNEL_SECTION: [CallbackQueryHandler(channel_section_handler)],
             LIST_CHANNELS: [CallbackQueryHandler(list_navigation_handler)],
             LIST_GROUPS: [CallbackQueryHandler(list_navigation_handler)],
+            AUTO_POST_MENU: [CallbackQueryHandler(auto_post_menu_handler, pattern="^(auto_set_groups|auto_set_message|auto_set_interval|auto_start|auto_stop|back_to_main)$")],
+            AUTO_POST_SET_GROUPS: [CallbackQueryHandler(auto_groups_handler)],
+            AUTO_POST_SET_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_set_message)],
+            AUTO_POST_SET_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, auto_set_interval)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
