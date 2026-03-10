@@ -2,11 +2,10 @@ import os
 import json
 import base64
 import asyncio
+import logging
 from typing import Dict, Optional, Any
 
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-#from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,14 +27,18 @@ from pyrogram.errors import (
     PhoneCodeExpired,
 )
 
+# إعداد التسجيل (logging)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # ==================== الإعدادات ====================
-# ملف تخزين الجلسات المشفر
 SESSIONS_FILE = "sessions.dat"
 
 # مفتاح التشفير (يُفضل أخذه من متغير بيئة)
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
-    # إذا لم يكن موجوداً، ننشئ مفتاحاً جديداً ونتنبيه المستخدم بحفظه
     key = Fernet.generate_key()
     print("=" * 60)
     print("لم يتم العثور على ENCRYPTION_KEY في متغيرات البيئة.")
@@ -44,7 +47,6 @@ if not ENCRYPTION_KEY:
     print("=" * 60)
     ENCRYPTION_KEY = key.decode()
 else:
-    # التأكد من أن المفتاح بالطول الصحيح
     try:
         Fernet(ENCRYPTION_KEY.encode())
     except Exception:
@@ -62,25 +64,23 @@ def load_sessions() -> Dict[int, Dict[str, Any]]:
             encrypted_data = f.read()
         decrypted_data = cipher.decrypt(encrypted_data)
         sessions = json.loads(decrypted_data)
-        # تحويل المفاتيح إلى int (json يخزنها كنصوص)
         return {int(k): v for k, v in sessions.items()}
     except Exception as e:
-        print(f"خطأ في تحميل الجلسات: {e}")
+        logger.error(f"خطأ في تحميل الجلسات: {e}")
         return {}
 
 def save_sessions(sessions: Dict[int, Dict[str, Any]]) -> None:
     """حفظ الجلسات في الملف المشفر."""
     try:
-        # تحويل المفاتيح إلى نصوص json
         data = {str(k): v for k, v in sessions.items()}
         json_data = json.dumps(data, ensure_ascii=False).encode()
         encrypted_data = cipher.encrypt(json_data)
         with open(SESSIONS_FILE, "wb") as f:
             f.write(encrypted_data)
     except Exception as e:
-        print(f"خطأ في حفظ الجلسات: {e}")
+        logger.error(f"خطأ في حفظ الجلسات: {e}")
 
-# تخزين الجلسات في الذاكرة مع التزامن مع الملف
+# تحميل الجلسات عند بدء التشغيل
 user_sessions = load_sessions()
 
 # ==================== حالات المحادثة ====================
@@ -134,6 +134,28 @@ async def validate_session(session_string: str, api_id: int, api_hash: str) -> b
         return False
     finally:
         await client.disconnect()
+
+# دوال مساعدة للقوائم
+async def remove_chat_from_list(context, chat_id: int):
+    """إزالة دردشة من القوائم المخزنة في context"""
+    for lst_name in ["channels_list", "groups_list"]:
+        lst = context.user_data.get(lst_name, [])
+        context.user_data[lst_name] = [item for item in lst if item[0] != chat_id]
+
+async def refresh_current_list(update: Update, context):
+    """إعادة عرض القائمة الحالية بعد التعديل"""
+    query = update.callback_query
+    if "channels_list" in context.user_data:
+        await show_channels_page(update, context)
+        return LIST_CHANNELS
+    elif "groups_list" in context.user_data:
+        await show_groups_page(update, context)
+        return LIST_GROUPS
+    else:
+        await query.edit_message_text(
+            "العودة للقسم", reply_markup=channel_section_keyboard()
+        )
+        return CHANNEL_SECTION
 
 # ==================== لوحات المفاتيح ====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -299,7 +321,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, use
             "username": me.username,
             "phone": me.phone_number,
         }
-        save_sessions(user_sessions)  # حفظ مشفر
+        save_sessions(user_sessions)
 
         login_data.pop(user_id, None)
         await client.disconnect()
@@ -310,6 +332,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         )
         return MAIN_MENU
     except Exception as e:
+        logger.error(f"خطأ في finalize_login: {e}")
         await update.message.reply_text(f"حدث خطأ أثناء إنهاء تسجيل الدخول: {e}")
         return ConversationHandler.END
 
@@ -333,8 +356,9 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return ConversationHandler.END
 
         info = f"📌 الاسم: {user_data.get('first_name', 'غير معروف')}\n"
-        info += f"👤 اليوزرنيم: @{user_data['username']}" if user_data.get('username') else ""
-        info += f"\n📱 الرقم: {user_data.get('phone', 'غير معروف')}"
+        if user_data.get('username'):
+            info += f"👤 اليوزرنيم: @{user_data['username']}\n"
+        info += f"📱 الرقم: {user_data.get('phone', 'غير معروف')}"
         await query.edit_message_text(info, reply_markup=main_menu_keyboard())
         return MAIN_MENU
 
@@ -374,12 +398,14 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
                     try:
                         await client.leave_chat(dialog.chat.id)
                         left_count += 1
+                        logger.info(f"مغادرة قناة: {dialog.chat.title}")
                     except RPCError as e:
-                        print(f"خطأ في مغادرة {dialog.chat.title}: {e}")
+                        logger.error(f"خطأ في مغادرة {dialog.chat.title}: {e}")
             await query.edit_message_text(
                 f"✅ تمت مغادرة {left_count} قناة.", reply_markup=channel_section_keyboard()
             )
         except Exception as e:
+            logger.error(f"خطأ عام في leave_all_channels: {e}")
             await query.edit_message_text(f"حدث خطأ: {e}", reply_markup=channel_section_keyboard())
         finally:
             await client.disconnect()
@@ -395,12 +421,14 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
                     try:
                         await client.leave_chat(dialog.chat.id)
                         left_count += 1
+                        logger.info(f"مغادرة جروب: {dialog.chat.title}")
                     except RPCError as e:
-                        print(f"خطأ في مغادرة {dialog.chat.title}: {e}")
+                        logger.error(f"خطأ في مغادرة {dialog.chat.title}: {e}")
             await query.edit_message_text(
                 f"✅ تمت مغادرة {left_count} جروب.", reply_markup=channel_section_keyboard()
             )
         except Exception as e:
+            logger.error(f"خطأ عام في leave_all_groups: {e}")
             await query.edit_message_text(f"حدث خطأ: {e}", reply_markup=channel_section_keyboard())
         finally:
             await client.disconnect()
@@ -416,8 +444,10 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
                     channels.append((dialog.chat.id, dialog.chat.title or "بدون عنوان"))
             context.user_data["channels_list"] = channels
             context.user_data["channels_page"] = 0
+            context.user_data["current_list_state"] = LIST_CHANNELS
             await show_channels_page(update, context)
         except Exception as e:
+            logger.error(f"خطأ في تحميل القنوات: {e}")
             await query.edit_message_text(f"حدث خطأ: {e}", reply_markup=channel_section_keyboard())
         finally:
             await client.disconnect()
@@ -433,8 +463,10 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
                     groups.append((dialog.chat.id, dialog.chat.title or "بدون عنوان"))
             context.user_data["groups_list"] = groups
             context.user_data["groups_page"] = 0
+            context.user_data["current_list_state"] = LIST_GROUPS
             await show_groups_page(update, context)
         except Exception as e:
+            logger.error(f"خطأ في تحميل الجروبات: {e}")
             await query.edit_message_text(f"حدث خطأ: {e}", reply_markup=channel_section_keyboard())
         finally:
             await client.disconnect()
@@ -522,6 +554,7 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
 
     data = query.data
 
+    # التنقل في القنوات
     if data.startswith("channels_page_"):
         if data == "channels_page_next":
             context.user_data["channels_page"] = context.user_data.get("channels_page", 0) + 1
@@ -530,6 +563,7 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         await show_channels_page(update, context)
         return LIST_CHANNELS
 
+    # التنقل في الجروبات
     if data.startswith("groups_page_"):
         if data == "groups_page_next":
             context.user_data["groups_page"] = context.user_data.get("groups_page", 0) + 1
@@ -538,34 +572,65 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         await show_groups_page(update, context)
         return LIST_GROUPS
 
+    # معالجة طلب المغادرة
     if data.startswith("leave_chat:"):
-        chat_id = int(data.split(":")[1])
+        # استخراج معرف الدردشة
+        chat_id_str = data.split(":")[1]
+        try:
+            chat_id = int(chat_id_str)
+        except ValueError:
+            await query.edit_message_text("❌ معرف الدردشة غير صالح.")
+            return context.user_data.get("current_list_state", CHANNEL_SECTION)
+
         session_str = user_data["session"]
         api_id = user_data["api_id"]
         api_hash = user_data["api_hash"]
+
         client = await create_pyrogram_client(api_id, api_hash, session_str)
+
         try:
             await client.connect()
+            logger.info(f"محاولة مغادرة الدردشة: {chat_id}")
+
+            # تحقق أولاً إذا كنا لا نزال عضوًا (اختياري)
+            try:
+                chat = await client.get_chat(chat_id)
+                if not chat:
+                    raise Exception("الدردشة غير موجودة")
+            except Exception as e:
+                logger.warning(f"لا يمكن جلب معلومات الدردشة {chat_id}: {e}")
+                await remove_chat_from_list(context, chat_id)
+                await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة (أو تم حذفها). تمت إزالتها من القائمة.")
+                return await refresh_current_list(update, context)
+
+            # محاولة المغادرة
             await client.leave_chat(chat_id)
-            # إزالة الدردشة من القائمة
-            for lst_name in ["channels_list", "groups_list"]:
-                lst = context.user_data.get(lst_name, [])
-                context.user_data[lst_name] = [item for item in lst if item[0] != chat_id]
+            logger.info(f"تمت المغادرة بنجاح من {chat_id}")
+
+            await remove_chat_from_list(context, chat_id)
             await query.edit_message_text("✅ تمت المغادرة بنجاح.")
+
         except RPCError as e:
-            await query.edit_message_text(f"❌ فشلت المغادرة: {e}")
+            logger.error(f"خطأ RPC أثناء مغادرة {chat_id}: {e}")
+            error_msg = str(e)
+
+            if "USER_NOT_PARTICIPANT" in error_msg:
+                await remove_chat_from_list(context, chat_id)
+                await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة. تمت إزالتها من القائمة.")
+            elif "CHAT_ID_INVALID" in error_msg:
+                await remove_chat_from_list(context, chat_id)
+                await query.edit_message_text("⚠️ معرف الدردشة غير صالح (ربما تم حذفها). تمت إزالتها من القائمة.")
+            else:
+                await query.edit_message_text(f"❌ فشلت المغادرة: {e}")
+
+        except Exception as e:
+            logger.error(f"خطأ غير متوقع: {e}")
+            await query.edit_message_text(f"❌ حدث خطأ غير متوقع: {e}")
+
         finally:
             await client.disconnect()
 
-        if "channels_list" in context.user_data:
-            await show_channels_page(update, context)
-            return LIST_CHANNELS
-        elif "groups_list" in context.user_data:
-            await show_groups_page(update, context)
-            return LIST_GROUPS
-        else:
-            await query.edit_message_text("العودة للقسم", reply_markup=channel_section_keyboard())
-            return CHANNEL_SECTION
+        return await refresh_current_list(update, context)
 
     if data == "back_to_channel_section":
         await query.edit_message_text("اختر العملية:", reply_markup=channel_section_keyboard())
