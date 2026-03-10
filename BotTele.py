@@ -28,13 +28,12 @@ from pyrogram.errors import (
     CHANNEL_SECTION,
     LIST_CHANNELS,
     LIST_GROUPS,
-    # حالات تسجيل الدخول
     AWAITING_API_ID,
     AWAITING_API_HASH,
     AWAITING_PHONE,
     AWAITING_CODE,
     AWAITING_PASSWORD,
-) = range(8)
+) = range(9)
 
 # تخزين جلسات المستخدمين (يُفضل استخدام قاعدة بيانات في الإنتاج)
 # المفتاح: user_id، القيمة: session_string
