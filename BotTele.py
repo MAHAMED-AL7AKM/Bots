@@ -249,7 +249,7 @@ def get_auto_menu_text(user_data: dict) -> str:
     status_text = "مفعل" if enabled else "متوقف"
 
     return (
-        f"✦ **إعدادات النشر التلقائي** ✦\n\n"
+        f"✨ **إعدادات النشر التلقائي** ✨\n\n"
         f"{status_emoji} **الحالة:** {status_text}\n"
         f"👥 **المجموعات:** {groups_count}\n"
         f"📝 **الرسالة:** `{msg_preview}`\n"
@@ -303,7 +303,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if get_user_session_data(user_id):
         await update.message.reply_text(
-            "✦ **مرحباً بعودتك!** ✦\n\nاختر من القائمة أدناه:",
+            "✨ **مرحباً بعودتك!** ✨\n\n"
+            "اختر من القائمة أدناه:",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
         )
@@ -311,15 +312,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if user_id in login_data:
         await update.message.reply_text(
-            "⚠️ لديك عملية تسجيل دخول غير مكتملة. أرسل /cancel لإلغائها ثم أرسل /start مرة أخرى."
+            "⚠️ لديك عملية تسجيل دخول غير مكتملة.\n"
+            "أرسل /cancel لإلغائها ثم أرسل /start مرة أخرى."
         )
         return ConversationHandler.END
 
     login_data[user_id] = {}
     await update.message.reply_text(
-        "✦ **تسجيل الدخول إلى حساب التليجرام** ✦\n\n"
-        "الرجاء إدخال **API ID** الخاص بك (من my.telegram.org).\n"
-        "إذا لم يكن لديك، احصل عليه من: https://my.telegram.org/apps"
+        "🌟 **تسجيل الدخول إلى حساب التليجرام** 🌟\n\n"
+        "الرجاء إدخال **𝗔𝗣𝗜 𝗜𝗗** الخاص بك (من my.telegram.org).\n"
+        "إذا لم يكن لديك، احصل عليه من: https://my.telegram.org/apps\n\n"
+        "`API ID` هو رقم مكون من 8 أرقام تقريباً."
     )
     return AWAITING_API_ID
 
@@ -328,11 +331,18 @@ async def receive_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text.strip()
 
     if not text.isdigit():
-        await update.message.reply_text("❌ API ID يجب أن يكون رقماً. حاول مرة أخرى:")
+        await update.message.reply_text(
+            "❌ **API ID** يجب أن يكون رقماً.\n"
+            "حاول مرة أخرى:"
+        )
         return AWAITING_API_ID
 
     login_data[user_id]["api_id"] = int(text)
-    await update.message.reply_text("✅ تم استلام API ID. الآن أرسل **API Hash** الخاص بك:")
+    await update.message.reply_text(
+        "✅ تم استلام **API ID**.\n\n"
+        "الآن أرسل **𝗔𝗣𝗜 𝗛𝗔𝗦𝗛** الخاص بك:\n"
+        "`API Hash` هو سلسلة طويلة من الحروف والأرقام."
+    )
     return AWAITING_API_HASH
 
 async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -340,12 +350,15 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     api_hash = update.message.text.strip()
 
     if len(api_hash) < 5:
-        await update.message.reply_text("❌ API Hash غير صالح. حاول مرة أخرى:")
+        await update.message.reply_text(
+            "❌ **API Hash** غير صالح.\n"
+            "تأكد من أنك نسخته بالكامل وحاول مرة أخرى:"
+        )
         return AWAITING_API_HASH
 
     login_data[user_id]["api_hash"] = api_hash
     await update.message.reply_text(
-        "✅ تم استلام API Hash.\n"
+        "✅ تم استلام **API Hash**.\n\n"
         "الآن أرسل رقم هاتفك بالصيغة الدولية (مثال: +9665xxxxxxxx):"
     )
     return AWAITING_PHONE
@@ -365,15 +378,24 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         sent_code = await client.send_code(phone)
         login_data[user_id]["phone_code_hash"] = sent_code.phone_code_hash
         login_data[user_id]["client"] = client
-        await update.message.reply_text("📱 تم إرسال رمز التحقق إلى هاتفك. أرسل الرمز هنا (مثال: 12345):")
+        await update.message.reply_text(
+            "📱 **تم إرسال رمز التحقق** إلى هاتفك.\n"
+            "أدخل الرمز المكون من 5 أرقام (مثال: 12345):"
+        )
         return AWAITING_CODE
     except PhoneNumberInvalid:
         await client.disconnect()
-        await update.message.reply_text("❌ رقم الهاتف غير صالح. حاول مرة أخرى:")
+        await update.message.reply_text(
+            "❌ رقم الهاتف غير صالح.\n"
+            "تأكد من الصيغة الدولية (مثال: +9665xxxxxxxx) وحاول مرة أخرى:"
+        )
         return AWAITING_PHONE
     except Exception as e:
         await client.disconnect()
-        await update.message.reply_text(f"❌ حدث خطأ: {e}\nالرجاء إرسال /start للبدء من جديد.")
+        await update.message.reply_text(
+            f"❌ حدث خطأ: {e}\n"
+            "الرجاء إرسال /start للبدء من جديد."
+        )
         login_data.pop(user_id, None)
         return ConversationHandler.END
 
@@ -383,7 +405,9 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     data = login_data.get(user_id)
     if not data:
-        await update.message.reply_text("❌ حدث خطأ. أرسل /start مرة أخرى.")
+        await update.message.reply_text(
+            "❌ حدث خطأ. أرسل /start مرة أخرى."
+        )
         return ConversationHandler.END
 
     client = data.get("client")
@@ -393,13 +417,22 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     try:
         await client.sign_in(phone, phone_code_hash, code)
     except SessionPasswordNeeded:
-        await update.message.reply_text("🔐 الحساب محمي بكلمة مرور (2FA). أرسل كلمة المرور:")
+        await update.message.reply_text(
+            "🔐 الحساب محمي بكلمة مرور (2FA).\n"
+            "أدخل كلمة المرور:"
+        )
         return AWAITING_PASSWORD
     except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        await update.message.reply_text("❌ الرمز غير صحيح أو منتهي الصلاحية. أرسل الرمز مجدداً:")
+        await update.message.reply_text(
+            "❌ الرمز غير صحيح أو منتهي الصلاحية.\n"
+            "أدخل الرمز مجدداً:"
+        )
         return AWAITING_CODE
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}\nأرسل /start للبدء من جديد.")
+        await update.message.reply_text(
+            f"❌ خطأ: {e}\n"
+            "أرسل /start للبدء من جديد."
+        )
         login_data.pop(user_id, None)
         return ConversationHandler.END
 
@@ -411,14 +444,19 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     data = login_data.get(user_id)
     if not data:
-        await update.message.reply_text("❌ حدث خطأ. أرسل /start مرة أخرى.")
+        await update.message.reply_text(
+            "❌ حدث خطأ. أرسل /start مرة أخرى."
+        )
         return ConversationHandler.END
 
     client = data.get("client")
     try:
         await client.check_password(password)
     except Exception as e:
-        await update.message.reply_text("❌ كلمة المرور غير صحيحة. حاول مرة أخرى:")
+        await update.message.reply_text(
+            "❌ كلمة المرور غير صحيحة.\n"
+            "حاول مرة أخرى:"
+        )
         return AWAITING_PASSWORD
 
     return await finalize_login(update, context, user_id, client)
@@ -477,7 +515,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if query.data == "channel_section":
         await query.edit_message_text(
-            "✦ **إدارة المغادرة** ✦\n\nاختر العملية التي تريدها:",
+            "🚪 **إدارة المغادرة** 🚪\n\nاختر العملية التي تريدها:",
             reply_markup=channel_section_keyboard(),
             parse_mode="Markdown"
         )
@@ -504,11 +542,11 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return ConversationHandler.END
 
         info = (
-            f"✦ **معلومات الحساب** ✦\n\n"
+            f"👤 **معلومات الحساب** 👤\n\n"
             f"📌 **الاسم:** {user_data.get('first_name', 'غير معروف')}\n"
         )
         if user_data.get('username'):
-            info += f"👤 **اليوزرنيم:** @{user_data['username']}\n"
+            info += f"🔗 **اليوزرنيم:** @{user_data['username']}\n"
         info += f"📱 **الرقم:** {user_data.get('phone', 'غير معروف')}"
         await query.edit_message_text(info, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         return MAIN_MENU
@@ -628,7 +666,7 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif query.data == "back_to_main":
         await query.edit_message_text(
-            "✦ **القائمة الرئيسية** ✦\n\nاختر أحد الأقسام:",
+            "✨ **القائمة الرئيسية** ✨\n\nاختر أحد الأقسام:",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
         )
@@ -664,7 +702,7 @@ async def show_channels_page(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard.append([InlineKeyboardButton("🔙 رجوع لقسم المغادرة", callback_data="back_to_channel_section")])
 
     await query.edit_message_text(
-        f"✦ **قائمة القنوات** ✦\n(صفحة {page+1}/{total_pages})",
+        f"📢 **قائمة القنوات** 📢\n(صفحة {page+1}/{total_pages})",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -696,7 +734,7 @@ async def show_groups_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     keyboard.append([InlineKeyboardButton("🔙 رجوع لقسم المغادرة", callback_data="back_to_channel_section")])
 
     await query.edit_message_text(
-        f"✦ **قائمة الجروبات** ✦\n(صفحة {page+1}/{total_pages})",
+        f"👥 **قائمة الجروبات** 👥\n(صفحة {page+1}/{total_pages})",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -777,7 +815,7 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
             return LIST_GROUPS
         else:
             await query.edit_message_text(
-                "✦ **إدارة المغادرة** ✦",
+                "🚪 **إدارة المغادرة** 🚪",
                 reply_markup=channel_section_keyboard(),
                 parse_mode="Markdown"
             )
@@ -785,7 +823,7 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if data == "back_to_channel_section":
         await query.edit_message_text(
-            "✦ **إدارة المغادرة** ✦\n\nاختر العملية التي تريدها:",
+            "🚪 **إدارة المغادرة** 🚪\n\nاختر العملية التي تريدها:",
             reply_markup=channel_section_keyboard(),
             parse_mode="Markdown"
         )
@@ -882,7 +920,7 @@ async def auto_post_menu_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "back_to_main":
         await query.edit_message_text(
-            "✦ **القائمة الرئيسية** ✦\n\nاختر أحد الأقسام:",
+            "✨ **القائمة الرئيسية** ✨\n\nاختر أحد الأقسام:",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
         )
@@ -921,13 +959,13 @@ async def show_auto_groups_page(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="auto_back_to_menu")])
 
     await query.edit_message_text(
-        f"✦ **اختر المجموعات** ✦\n(صفحة {page+1}/{total_pages})",
+        f"📋 **اختر المجموعات** 📋\n(صفحة {page+1}/{total_pages})",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
 async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """معالج اختيار المجموعات للنشر التلقائي"""
+    """معالج اختيار المجموعات للنشر التلقائي مع تقرير مفصل عن المرفوضة"""
     query = update.callback_query
     await query.answer()
 
@@ -958,7 +996,7 @@ async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = update.effective_user.id
         selected = context.user_data.get("auto_selected_groups", set())
 
-        # التحقق من صلاحية المجموعات المختارة (اختياري للسلامة)
+        # التحقق من صلاحية المجموعات المختارة مع تقرير مفصل
         user_data = get_user_session_data(user_id)
         if not user_data:
             await query.edit_message_text("❌ حدث خطأ في استرجاع بيانات المستخدم.")
@@ -969,6 +1007,7 @@ async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         session_str = user_data["session"]
         client = await create_pyrogram_client(api_id, api_hash, session_str)
         valid_groups = []
+        rejected = []  # قائمة المجموعات المرفوضة مع السبب
         try:
             await client.connect()
             for chat_id in selected:
@@ -977,8 +1016,16 @@ async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if chat and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
                         valid_groups.append(chat_id)
                     else:
+                        rejected.append((chat_id, "ليست مجموعة صالحة (قد تكون قناة)"))
                         logger.warning(f"المجموعة {chat_id} ليست من النوع المتوقع")
                 except Exception as e:
+                    reason = str(e)
+                    if "USER_NOT_PARTICIPANT" in reason:
+                        rejected.append((chat_id, "لست عضواً في هذه المجموعة"))
+                    elif "CHAT_ID_INVALID" in reason:
+                        rejected.append((chat_id, "معرف غير صالح (المجموعة محذوفة)"))
+                    else:
+                        rejected.append((chat_id, f"خطأ: {reason[:50]}"))
                     logger.warning(f"المجموعة {chat_id} غير صالحة: {e}")
         except Exception as e:
             logger.error(f"خطأ في الاتصال أثناء التحقق: {e}")
@@ -993,14 +1040,22 @@ async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         save_sessions(user_sessions)
         stop_auto_post(user_id)
 
-        invalid_count = len(selected) - len(valid_groups)
-        msg = f"✅ تم حفظ {len(valid_groups)} مجموعة صالحة."
-        if invalid_count > 0:
-            msg += f"\n⚠️ تم تجاهل {invalid_count} مجموعة غير صالحة."
+        # بناء رسالة التقرير
+        msg_lines = []
+        if valid_groups:
+            msg_lines.append(f"✅ **{len(valid_groups)} مجموعة صالحة** تم حفظها.")
+        if rejected:
+            msg_lines.append(f"⚠️ **{len(rejected)} مجموعة تم تجاهلها:**")
+            for chat_id, reason in rejected[:5]:  # نعرض أول 5 فقط
+                msg_lines.append(f"• `{chat_id}`: {reason}")
+            if len(rejected) > 5:
+                msg_lines.append(f"  ... و{len(rejected)-5} أخرى")
+
+        report = "\n".join(msg_lines) if msg_lines else "لم يتم حفظ أي مجموعة."
 
         text = get_auto_menu_text(user_data)
         await query.edit_message_text(
-            f"{msg}\n\n{text}",
+            f"{report}\n\n{text}",
             reply_markup=auto_post_menu_keyboard(user_data),
             parse_mode="Markdown"
         )
@@ -1047,12 +1102,16 @@ async def auto_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = update.message.text.strip()
 
     if not text.isdigit():
-        await update.message.reply_text("❌ الرجاء إدخال رقم صحيح (بالثواني):")
+        await update.message.reply_text(
+            "❌ الرجاء إدخال رقم صحيح (بالثواني):"
+        )
         return AUTO_POST_SET_INTERVAL
 
     interval = int(text)
     if interval < 5:
-        await update.message.reply_text("⚠️ يجب أن يكون الفاصل 5 ثوانٍ على الأقل.")
+        await update.message.reply_text(
+            "⚠️ يجب أن يكون الفاصل 5 ثوانٍ على الأقل."
+        )
         return AUTO_POST_SET_INTERVAL
 
     user_data = get_user_session_data(user_id)
