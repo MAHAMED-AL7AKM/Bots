@@ -1,6 +1,12 @@
 import os
+import json
+import base64
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,7 +28,62 @@ from pyrogram.errors import (
     PhoneCodeExpired,
 )
 
-# ==================== States ====================
+# ==================== الإعدادات ====================
+# ملف تخزين الجلسات المشفر
+SESSIONS_FILE = "sessions.dat"
+
+# مفتاح التشفير (يُفضل أخذه من متغير بيئة)
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    # إذا لم يكن موجوداً، ننشئ مفتاحاً جديداً ونتنبيه المستخدم بحفظه
+    key = Fernet.generate_key()
+    print("=" * 60)
+    print("لم يتم العثور على ENCRYPTION_KEY في متغيرات البيئة.")
+    print("تم إنشاء مفتاح تشفير جديد. يجب حفظه لاستخدامه في المرات القادمة:")
+    print(key.decode())
+    print("=" * 60)
+    ENCRYPTION_KEY = key.decode()
+else:
+    # التأكد من أن المفتاح بالطول الصحيح
+    try:
+        Fernet(ENCRYPTION_KEY.encode())
+    except Exception:
+        raise ValueError("ENCRYPTION_KEY غير صالح. يجب أن يكون 32 بايت مشفرة base64.")
+
+cipher = Fernet(ENCRYPTION_KEY.encode())
+
+# ==================== إدارة التخزين المشفر ====================
+def load_sessions() -> Dict[int, Dict[str, Any]]:
+    """تحميل الجلسات من الملف المشفر وإرجاع قاموس."""
+    if not os.path.exists(SESSIONS_FILE):
+        return {}
+    try:
+        with open(SESSIONS_FILE, "rb") as f:
+            encrypted_data = f.read()
+        decrypted_data = cipher.decrypt(encrypted_data)
+        sessions = json.loads(decrypted_data)
+        # تحويل المفاتيح إلى int (json يخزنها كنصوص)
+        return {int(k): v for k, v in sessions.items()}
+    except Exception as e:
+        print(f"خطأ في تحميل الجلسات: {e}")
+        return {}
+
+def save_sessions(sessions: Dict[int, Dict[str, Any]]) -> None:
+    """حفظ الجلسات في الملف المشفر."""
+    try:
+        # تحويل المفاتيح إلى نصوص json
+        data = {str(k): v for k, v in sessions.items()}
+        json_data = json.dumps(data, ensure_ascii=False).encode()
+        encrypted_data = cipher.encrypt(json_data)
+        with open(SESSIONS_FILE, "wb") as f:
+            f.write(encrypted_data)
+    except Exception as e:
+        print(f"خطأ في حفظ الجلسات: {e}")
+
+# تخزين الجلسات في الذاكرة مع التزامن مع الملف
+user_sessions = load_sessions()
+
+# ==================== حالات المحادثة ====================
 (
     MAIN_MENU,
     CHANNEL_SECTION,
@@ -35,22 +96,24 @@ from pyrogram.errors import (
     AWAITING_PASSWORD,
 ) = range(9)
 
-# تخزين جلسات المستخدمين (يُفضل استخدام قاعدة بيانات في الإنتاج)
-# المفتاح: user_id، القيمة: session_string
-user_sessions: Dict[int, str] = {}
-
-# تخزين مؤقت لبيانات الدخول لكل مستخدم (للمحادثة فقط)
+# تخزين مؤقت لبيانات الدخول
 login_data: Dict[int, dict] = {}
 
-# ==================== Bot Token ====================
+# ==================== توكن البوت ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    # إذا لم يكن موجوداً في البيئة، نطلب إدخاله يدوياً
     BOT_TOKEN = input("الرجاء إدخال توكن البوت: ").strip()
     if not BOT_TOKEN:
         raise ValueError("لا يمكن تشغيل البوت بدون توكن.")
 
-# ==================== Helper functions ====================
+# ==================== دوال مساعدة ====================
+def get_user_session_data(user_id: int) -> Optional[Dict]:
+    """إرجاع بيانات جلسة المستخدم إذا كانت موجودة وصالحة"""
+    data = user_sessions.get(user_id)
+    if isinstance(data, dict) and "session" in data and "api_id" in data and "api_hash" in data:
+        return data
+    return None
+
 async def create_pyrogram_client(
     api_id: int, api_hash: str, session_string: Optional[str] = None
 ) -> Client:
@@ -72,7 +135,7 @@ async def validate_session(session_string: str, api_id: int, api_hash: str) -> b
     finally:
         await client.disconnect()
 
-# ==================== Keyboards ====================
+# ==================== لوحات المفاتيح ====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("🚪 إدارة المغادرة (القنوات والجروبات)", callback_data="channel_section")],
@@ -91,26 +154,23 @@ def channel_section_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== Start / Login flow ====================
+# ==================== بداية المحادثة / تسجيل الدخول ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
 
-    # إذا كان المستخدم لديه جلسة مخزنة، ننتقل مباشرة إلى القائمة
-    if user_id in user_sessions:
+    if get_user_session_data(user_id):
         await update.message.reply_text(
             "مرحباً! أنت مسجل الدخول بالفعل. اختر من القائمة:",
             reply_markup=main_menu_keyboard(),
         )
         return MAIN_MENU
 
-    # إذا بدأ محادثة تسجيل دخول سابقة ولم تكتمل، نطلب منه الاستمرار أو البدء من جديد
     if user_id in login_data:
         await update.message.reply_text(
             "يبدو أن لديك عملية تسجيل دخول غير مكتملة. أرسل /cancel لإلغائها ثم أرسل /start مرة أخرى."
         )
         return ConversationHandler.END
 
-    # بداية تسجيل الدخول
     login_data[user_id] = {}
     await update.message.reply_text(
         "لبدء استخدام البوت، يرجى إدخال **API ID** الخاص بك (من my.telegram.org).\n"
@@ -134,7 +194,7 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     api_hash = update.message.text.strip()
 
-    if len(api_hash) < 5:  # تحقق بسيط
+    if len(api_hash) < 5:
         await update.message.reply_text("API Hash غير صالح. حاول مرة أخرى:")
         return AWAITING_API_HASH
 
@@ -151,17 +211,15 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     login_data[user_id]["phone"] = phone
 
-    # إنشاء عميل pyrogram جديد (بدون session)
     api_id = login_data[user_id]["api_id"]
     api_hash = login_data[user_id]["api_hash"]
     client = await create_pyrogram_client(api_id, api_hash)
 
     try:
         await client.connect()
-        # إرسال رمز التحقق
         sent_code = await client.send_code(phone)
         login_data[user_id]["phone_code_hash"] = sent_code.phone_code_hash
-        login_data[user_id]["client"] = client  # نخزن العميل لاستخدامه لاحقاً
+        login_data[user_id]["client"] = client
         await update.message.reply_text("تم إرسال رمز التحقق إلى هاتفك. أرسل الرمز هنا (مثال: 12345):")
         return AWAITING_CODE
     except PhoneNumberInvalid:
@@ -190,7 +248,6 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     try:
         await client.sign_in(phone, phone_code_hash, code)
     except SessionPasswordNeeded:
-        # الحماية بخطوتين مفعلة
         await update.message.reply_text("الحساب محمي بكلمة مرور (2FA). أرسل كلمة المرور:")
         return AWAITING_PASSWORD
     except (PhoneCodeInvalid, PhoneCodeExpired) as e:
@@ -201,7 +258,6 @@ async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         login_data.pop(user_id, None)
         return ConversationHandler.END
 
-    # تم تسجيل الدخول بنجاح (بدون 2FA)
     return await finalize_login(update, context, user_id, client)
 
 async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -220,31 +276,36 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"كلمة المرور غير صحيحة. حاول مرة أخرى:")
         return AWAITING_PASSWORD
 
-    # تم تسجيل الدخول بنجاح مع 2FA
     return await finalize_login(update, context, user_id, client)
 
 async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, client: Client) -> int:
-    """استكمال تسجيل الدخول: استخراج session string وتخزينها"""
+    """استكمال تسجيل الدخول: تخزين البيانات المشفرة"""
     try:
-        # التأكد من أن العميل متصل
         if not client.is_connected:
             await client.connect()
 
-        # الحصول على معلومات الحساب
         me = await client.get_me()
         session_string = await client.export_session_string()
 
-        # تخزين الجلسة
-        user_sessions[user_id] = session_string
+        api_id = login_data[user_id]["api_id"]
+        api_hash = login_data[user_id]["api_hash"]
 
-        # تنظيف بيانات الدخول المؤقتة
+        # تخزين في الذاكرة وفي الملف
+        user_sessions[user_id] = {
+            "session": session_string,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "first_name": me.first_name,
+            "username": me.username,
+            "phone": me.phone_number,
+        }
+        save_sessions(user_sessions)  # حفظ مشفر
+
         login_data.pop(user_id, None)
         await client.disconnect()
 
         await update.message.reply_text(
-            f"✅ تم تسجيل الدخول بنجاح!\n"
-            f"مرحباً {me.first_name}.\n"
-            "يمكنك الآن استخدام القائمة.",
+            f"✅ تم تسجيل الدخول بنجاح!\nمرحباً {me.first_name}.\nيمكنك الآن استخدام القائمة.",
             reply_markup=main_menu_keyboard(),
         )
         return MAIN_MENU
@@ -252,7 +313,7 @@ async def finalize_login(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         await update.message.reply_text(f"حدث خطأ أثناء إنهاء تسجيل الدخول: {e}")
         return ConversationHandler.END
 
-# ==================== Main Menu Handlers ====================
+# ==================== معالجات القوائم الرئيسية ====================
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -266,41 +327,32 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return CHANNEL_SECTION
 
     elif query.data == "account_info":
-        session_str = user_sessions.get(user_id)
-        if not session_str:
+        user_data = get_user_session_data(user_id)
+        if not user_data:
             await query.edit_message_text("لم يتم العثور على جلسة. أرسل /start مرة أخرى.")
             return ConversationHandler.END
 
-        # استرجاع api_id و api_hash من session؟ لا يمكن استخراجهما مباشرة، لكننا نحتاجهما لإنشاء client.
-        # الحل: يمكننا تخزين api_id و api_hash مع session، لكننا لم نخزنهما. سنطلب من المستخدم إدخالهما مرة أخرى؟ غير عملي.
-        # الأفضل: عند تسجيل الدخول، نخزن أيضاً api_id و api_hash المرتبطين بالجلسة.
-        # لذلك سنقوم بتعديل user_sessions ليخزن قاموساً بدلاً من نص فقط.
-        # لكن للتبسيط، سنقوم بإنشاء client من session فقط، ونتجاهل api_id و api_hash لأن session تحتوي عليهما.
-        # المشكلة: pyrogram يتطلب api_id و api_hash لإنشاء client حتى مع session string.
-        # الحل: نحتاج إلى تخزين api_id و api_hash مع session. لذا يجب تغيير هيكل التخزين.
-
-        # تعديل: سنخزن في user_sessions قاموساً: {"session": ..., "api_id": ..., "api_hash": ...}
-        # هذا يتطلب تعديل الكود في finalize_login وحيثما يستخدم.
-        # سأقوم بإجراء التعديل اللاحق.
-
-        # مؤقتاً سنعرض رسالة بسيطة
-        await query.edit_message_text("هذه الميزة قيد التطوير.", reply_markup=main_menu_keyboard())
+        info = f"📌 الاسم: {user_data.get('first_name', 'غير معروف')}\n"
+        info += f"👤 اليوزرنيم: @{user_data['username']}" if user_data.get('username') else ""
+        info += f"\n📱 الرقم: {user_data.get('phone', 'غير معروف')}"
+        await query.edit_message_text(info, reply_markup=main_menu_keyboard())
         return MAIN_MENU
 
     elif query.data == "logout":
         user_sessions.pop(user_id, None)
+        save_sessions(user_sessions)
         await query.edit_message_text("تم تسجيل الخروج. أرسل /start للدخول مجدداً.")
         return ConversationHandler.END
 
     return MAIN_MENU
 
-# ==================== Channel Section Handlers ====================
+# ==================== قسم إدارة المغادرة ====================
 async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
     user_id = update.effective_user.id
-    user_data = user_sessions.get(user_id)  # يجب أن يكون قاموساً
+    user_data = get_user_session_data(user_id)
 
     if not user_data:
         await query.edit_message_text("الجلسة غير موجودة. أرسل /start.")
@@ -394,7 +446,7 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
 
     return CHANNEL_SECTION
 
-# ==================== Pagination Handlers ====================
+# ==================== عرض القوائم مع الترقيم ====================
 async def show_channels_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     channels = context.user_data.get("channels_list", [])
@@ -457,19 +509,19 @@ async def show_groups_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+# ==================== معالج التنقل والمغادرة المحددة ====================
 async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
     user_id = update.effective_user.id
-    user_data = user_sessions.get(user_id)
+    user_data = get_user_session_data(user_id)
     if not user_data:
         await query.edit_message_text("الجلسة غير موجودة. أرسل /start.")
         return ConversationHandler.END
 
     data = query.data
 
-    # التنقل في القنوات
     if data.startswith("channels_page_"):
         if data == "channels_page_next":
             context.user_data["channels_page"] = context.user_data.get("channels_page", 0) + 1
@@ -478,7 +530,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         await show_channels_page(update, context)
         return LIST_CHANNELS
 
-    # التنقل في الجروبات
     if data.startswith("groups_page_"):
         if data == "groups_page_next":
             context.user_data["groups_page"] = context.user_data.get("groups_page", 0) + 1
@@ -487,7 +538,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         await show_groups_page(update, context)
         return LIST_GROUPS
 
-    # مغادرة محددة
     if data.startswith("leave_chat:"):
         chat_id = int(data.split(":")[1])
         session_str = user_data["session"]
@@ -507,7 +557,6 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         finally:
             await client.disconnect()
 
-        # إعادة عرض القائمة المحدثة
         if "channels_list" in context.user_data:
             await show_channels_page(update, context)
             return LIST_CHANNELS
@@ -526,16 +575,14 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    # تنظيف بيانات الدخول المؤقتة
     login_data.pop(user_id, None)
-    # إغلاق أي عميل مفتوح
     client = login_data.get(user_id, {}).get("client")
     if client and client.is_connected:
         await client.disconnect()
     await update.message.reply_text("تم الإلغاء. أرسل /start للبدء مجدداً.")
     return ConversationHandler.END
 
-# ==================== Main ====================
+# ==================== التشغيل الرئيسي ====================
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
