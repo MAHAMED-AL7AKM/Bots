@@ -1,8 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+بوت تليجرام متكامل: إدارة المغادرة + النشر التلقائي
+تم تطويره بناءً على طلب المستخدم
+"""
+
 import os
 import json
 import asyncio
 import logging
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Set
 from datetime import datetime
 
 from cryptography.fernet import Fernet
@@ -17,6 +25,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
 from pyrogram import Client
 from pyrogram.enums import ChatType
 from pyrogram.errors import (
@@ -27,17 +36,18 @@ from pyrogram.errors import (
     PhoneCodeExpired,
 )
 
-# إعداد التسجيل
+# ==================== إعداد التسجيل ====================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ==================== الإعدادات ====================
-SESSIONS_FILE = "sessions.dat"
-
-# مفتاح التشفير (يُفضل أخذه من متغير بيئة)
+# ==================== الإعدادات العامة ====================
+SESSIONS_FILE = "sessions.dat"          # ملف تخزين الجلسات المشفر
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
+
+# إنشاء مفتاح تشفير إذا لم يكن موجوداً
 if not ENCRYPTION_KEY:
     key = Fernet.generate_key()
     print("=" * 60)
@@ -46,13 +56,12 @@ if not ENCRYPTION_KEY:
     print(key.decode())
     print("=" * 60)
     ENCRYPTION_KEY = key.decode()
-else:
-    try:
-        Fernet(ENCRYPTION_KEY.encode())
-    except Exception:
-        raise ValueError("ENCRYPTION_KEY غير صالح. يجب أن يكون 32 بايت مشفرة base64.")
 
-cipher = Fernet(ENCRYPTION_KEY.encode())
+# التحقق من صحة المفتاح
+try:
+    cipher = Fernet(ENCRYPTION_KEY.encode())
+except Exception:
+    raise ValueError("ENCRYPTION_KEY غير صالح. يجب أن يكون 32 بايت بصيغة base64.")
 
 # ==================== إدارة التخزين المشفر ====================
 def load_sessions() -> Dict[int, Dict[str, Any]]:
@@ -73,7 +82,7 @@ def save_sessions(sessions: Dict[int, Dict[str, Any]]) -> None:
     """حفظ الجلسات في الملف المشفر."""
     try:
         data = {str(k): v for k, v in sessions.items()}
-        json_data = json.dumps(data, ensure_ascii=False).encode()
+        json_data = json.dumps(data, ensure_ascii=False, indent=2).encode()
         encrypted_data = cipher.encrypt(json_data)
         with open(SESSIONS_FILE, "wb") as f:
             f.write(encrypted_data)
@@ -96,13 +105,12 @@ auto_post_tasks: Dict[int, asyncio.Task] = {}
     AUTO_POST_SET_GROUPS,
     AUTO_POST_SET_MESSAGE,
     AUTO_POST_SET_INTERVAL,
-    AUTO_POST_CONFIRM,
     AWAITING_API_ID,
     AWAITING_API_HASH,
     AWAITING_PHONE,
     AWAITING_CODE,
     AWAITING_PASSWORD,
-) = range(14)
+) = range(13)
 
 # تخزين مؤقت لبيانات الدخول
 login_data: Dict[int, dict] = {}
@@ -114,7 +122,7 @@ if not BOT_TOKEN:
     if not BOT_TOKEN:
         raise ValueError("لا يمكن تشغيل البوت بدون توكن.")
 
-# ==================== دوال مساعدة ====================
+# ==================== دوال مساعدة عامة ====================
 def get_user_session_data(user_id: int) -> Optional[Dict]:
     """إرجاع بيانات جلسة المستخدم إذا كانت موجودة وصالحة"""
     data = user_sessions.get(user_id)
@@ -131,102 +139,12 @@ async def create_pyrogram_client(
     else:
         return Client(":memory:", api_id=api_id, api_hash=api_hash)
 
-async def validate_session(session_string: str, api_id: int, api_hash: str) -> bool:
-    """التحقق من صحة session string"""
-    client = await create_pyrogram_client(api_id, api_hash, session_string)
-    try:
-        await client.connect()
-        me = await client.get_me()
-        return me is not None
-    except Exception:
-        return False
-    finally:
-        await client.disconnect()
-
 # دوال مساعدة للقوائم
 async def remove_chat_from_list(context, chat_id: int):
     """إزالة دردشة من القوائم المخزنة في context"""
     for lst_name in ["channels_list", "groups_list", "auto_groups_list"]:
         lst = context.user_data.get(lst_name, [])
         context.user_data[lst_name] = [item for item in lst if item[0] != chat_id]
-
-async def refresh_current_list(update: Update, context):
-    """إعادة عرض القائمة الحالية بعد التعديل"""
-    query = update.callback_query
-    if "channels_list" in context.user_data:
-        await show_channels_page(update, context)
-        return LIST_CHANNELS
-    elif "groups_list" in context.user_data:
-        await show_groups_page(update, context)
-        return LIST_GROUPS
-    elif "auto_groups_list" in context.user_data:
-        await show_auto_groups_page(update, context)
-        return AUTO_POST_SET_GROUPS
-    else:
-        await query.edit_message_text(
-            "العودة للقسم", reply_markup=main_menu_keyboard()
-        )
-        return MAIN_MENU
-
-# دوال النشر التلقائي
-async def auto_post_worker(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """مهمة خلفية لإرسال الرسائل بشكل دوري"""
-    logger.info(f"بدء النشر التلقائي للمستخدم {user_id}")
-    while True:
-        user_data = get_user_session_data(user_id)
-        if not user_data:
-            logger.warning(f"المستخدم {user_id} ليس لديه جلسة، إيقاف النشر")
-            break
-
-        auto_settings = user_data.get("auto_post")
-        if not auto_settings or not auto_settings.get("enabled"):
-            logger.info(f"النشر التلقائي للمستخدم {user_id} معطل")
-            break
-
-        groups = auto_settings.get("groups", [])
-        message = auto_settings.get("message")
-        interval = auto_settings.get("interval", 60)
-
-        if not groups or not message:
-            logger.warning(f"إعدادات غير مكتملة للمستخدم {user_id}")
-            break
-
-        api_id = user_data["api_id"]
-        api_hash = user_data["api_hash"]
-        session_str = user_data["session"]
-
-        client = await create_pyrogram_client(api_id, api_hash, session_str)
-        try:
-            await client.connect()
-            for chat_id in groups:
-                try:
-                    await client.send_message(chat_id, message)
-                    logger.info(f"تم إرسال رسالة إلى {chat_id}")
-                except RPCError as e:
-                    logger.error(f"فشل إرسال الرسالة إلى {chat_id}: {e}")
-                # انتظار بين الرسائل داخل نفس الدورة (إذا أردت)
-                await asyncio.sleep(2)  # مهلة قصيرة بين الرسائل
-        except Exception as e:
-            logger.error(f"خطأ في عميل pyrogram: {e}")
-        finally:
-            await client.disconnect()
-
-        # انتظار الفاصل الزمني المحدد قبل الدورة التالية
-        await asyncio.sleep(interval)
-
-def stop_auto_post(user_id: int):
-    """إيقاف مهمة النشر التلقائي لمستخدم"""
-    task = auto_post_tasks.pop(user_id, None)
-    if task:
-        task.cancel()
-        logger.info(f"تم إلغاء مهمة النشر للمستخدم {user_id}")
-
-def start_auto_post(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """بدء مهمة النشر التلقائي لمستخدم (إذا كانت مفعلة)"""
-    stop_auto_post(user_id)  # إلغاء أي مهمة سابقة
-    task = asyncio.create_task(auto_post_worker(user_id, context))
-    auto_post_tasks[user_id] = task
-    logger.info(f"تم بدء مهمة النشر للمستخدم {user_id}")
 
 # ==================== لوحات المفاتيح ====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -253,11 +171,11 @@ def auto_post_menu_keyboard(user_data) -> InlineKeyboardMarkup:
     auto = user_data.get("auto_post", {})
     enabled = auto.get("enabled", False)
     groups_count = len(auto.get("groups", []))
-    msg_preview = auto.get("message", "غير محددة")[:20] + "..." if auto.get("message") else "غير محددة"
+    msg_preview = (auto.get("message", "")[:20] + "...") if auto.get("message") else "غير محددة"
     interval = auto.get("interval", 60)
 
     status = "🟢 مفعل" if enabled else "🔴 متوقف"
-    text = f"الحالة: {status}\nالمجموعات: {groups_count}\nالرسالة: {msg_preview}\nالفاصل: {interval} ثانية"
+    text_display = f"الحالة: {status}\nالمجموعات: {groups_count}\nالرسالة: {msg_preview}\nالفاصل: {interval} ثانية"
 
     keyboard = [
         [InlineKeyboardButton("📋 اختيار المجموعات", callback_data="auto_set_groups")],
@@ -271,6 +189,99 @@ def auto_post_menu_keyboard(user_data) -> InlineKeyboardMarkup:
             keyboard.append([InlineKeyboardButton("▶️ بدء النشر", callback_data="auto_start")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")])
     return InlineKeyboardMarkup(keyboard)
+
+# ==================== دوال النشر التلقائي (المهمة الخلفية) ====================
+async def auto_post_worker(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """مهمة خلفية: إرسال الرسائل بشكل دوري مع إدارة الأخطاء وإزالة المجموعات الفاشلة"""
+    logger.info(f"بدء النشر التلقائي للمستخدم {user_id}")
+    failure_count: Dict[int, int] = {}
+
+    while True:
+        # جلب أحدث بيانات المستخدم
+        user_data = get_user_session_data(user_id)
+        if not user_data:
+            logger.warning(f"المستخدم {user_id} ليس لديه جلسة، إيقاف النشر")
+            break
+
+        auto_settings = user_data.get("auto_post")
+        if not auto_settings or not auto_settings.get("enabled"):
+            logger.info(f"النشر التلقائي للمستخدم {user_id} معطل")
+            break
+
+        groups = auto_settings.get("groups", [])
+        message = auto_settings.get("message")
+        interval = auto_settings.get("interval", 60)
+
+        if not groups or not message:
+            logger.warning(f"إعدادات غير مكتملة للمستخدم {user_id}")
+            break
+
+        api_id = user_data["api_id"]
+        api_hash = user_data["api_hash"]
+        session_str = user_data["session"]
+
+        client = await create_pyrogram_client(api_id, api_hash, session_str)
+        groups_to_remove: List[int] = []
+
+        try:
+            await client.connect()
+            logger.info(f"تم الاتصال، جاري الإرسال إلى {len(groups)} مجموعة")
+
+            for chat_id in groups:
+                try:
+                    # محاولة الإرسال مباشرة
+                    await client.send_message(chat_id, message)
+                    logger.info(f"تم إرسال رسالة إلى {chat_id}")
+                    failure_count.pop(chat_id, None)  # إعادة تعيين عداد الفشل
+
+                except RPCError as e:
+                    logger.error(f"فشل إرسال الرسالة إلى {chat_id}: {e}")
+                    err_str = str(e)
+                    # تحديد الأخطاء التي تستدعي إزالة المجموعة بعد عدة محاولات
+                    if any(x in err_str for x in ["USER_NOT_PARTICIPANT", "PEER_ID_INVALID", "CHAT_ID_INVALID"]):
+                        failure_count[chat_id] = failure_count.get(chat_id, 0) + 1
+                        if failure_count[chat_id] >= 3:
+                            groups_to_remove.append(chat_id)
+                            logger.info(f"تمت إضافة المجموعة {chat_id} للحذف بعد 3 محاولات فاشلة")
+                    # أخطاء أخرى (مثل flood wait) لا تؤدي للإزالة
+
+                except Exception as e:
+                    logger.error(f"خطأ غير متوقع مع {chat_id}: {e}")
+
+                await asyncio.sleep(2)  # مهلة بين الرسائل
+
+        except Exception as e:
+            logger.error(f"خطأ في اتصال العميل: {e}")
+        finally:
+            await client.disconnect()
+
+        # إزالة المجموعات الفاشلة من الإعدادات
+        if groups_to_remove:
+            # تحديث البيانات مرة أخرى (قد تكون تغيرت أثناء الحلقة)
+            user_data = get_user_session_data(user_id)
+            if user_data and "auto_post" in user_data:
+                current_groups = user_data["auto_post"].get("groups", [])
+                updated_groups = [g for g in current_groups if g not in groups_to_remove]
+                user_data["auto_post"]["groups"] = updated_groups
+                save_sessions(user_sessions)
+                logger.info(f"تمت إزالة {len(groups_to_remove)} مجموعة غير صالحة للمستخدم {user_id}")
+
+        logger.info(f"انتهت دورة النشر، انتظار {interval} ثانية")
+        await asyncio.sleep(interval)
+
+def stop_auto_post(user_id: int):
+    """إيقاف مهمة النشر التلقائي لمستخدم"""
+    task = auto_post_tasks.pop(user_id, None)
+    if task:
+        task.cancel()
+        logger.info(f"تم إلغاء مهمة النشر للمستخدم {user_id}")
+
+def start_auto_post(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """بدء مهمة النشر التلقائي لمستخدم"""
+    stop_auto_post(user_id)
+    task = asyncio.create_task(auto_post_worker(user_id, context))
+    auto_post_tasks[user_id] = task
+    logger.info(f"تم بدء مهمة النشر للمستخدم {user_id}")
 
 # ==================== بداية المحادثة / تسجيل الدخول ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -319,7 +330,7 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     login_data[user_id]["api_hash"] = api_hash
     await update.message.reply_text(
         "تم استلام API Hash.\n"
-        "الآن أرسل رقم هاتفك بالصيغة الدولية (مثال: +9627xxxxxxxx):"
+        "الآن أرسل رقم هاتفك بالصيغة الدولية (مثال: +9665xxxxxxxx):"
     )
     return AWAITING_PHONE
 
@@ -477,7 +488,6 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return MAIN_MENU
 
     elif query.data == "logout":
-        # إيقاف النشر التلقائي إن كان مفعلًا
         stop_auto_post(user_id)
         user_sessions.pop(user_id, None)
         save_sessions(user_sessions)
@@ -486,8 +496,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     return MAIN_MENU
 
-# ==================== قسم إدارة المغادرة (مثل السابق) ====================
-# (نفس الكود السابق، مختصر هنا للاختصار، لكنه موجود في الكود الكامل)
+# ==================== قسم إدارة المغادرة ====================
 async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -595,7 +604,7 @@ async def channel_section_handler(update: Update, context: ContextTypes.DEFAULT_
 
     return CHANNEL_SECTION
 
-# دوال عرض القنوات والجروبات (نفس السابق)
+# ==================== عرض القوائم مع الترقيم ====================
 async def show_channels_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     channels = context.user_data.get("channels_list", [])
@@ -688,7 +697,7 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         await show_groups_page(update, context)
         return LIST_GROUPS
 
-    # معالجة طلب المغادرة
+    # معالجة طلب المغادرة المحددة
     if data.startswith("leave_chat:"):
         chat_id_str = data.split(":")[1]
         try:
@@ -700,49 +709,42 @@ async def list_navigation_handler(update: Update, context: ContextTypes.DEFAULT_
         session_str = user_data["session"]
         api_id = user_data["api_id"]
         api_hash = user_data["api_hash"]
-
         client = await create_pyrogram_client(api_id, api_hash, session_str)
 
         try:
             await client.connect()
             logger.info(f"محاولة مغادرة الدردشة: {chat_id}")
-
-            try:
-                chat = await client.get_chat(chat_id)
-                if not chat:
-                    raise Exception("الدردشة غير موجودة")
-            except Exception as e:
-                logger.warning(f"لا يمكن جلب معلومات الدردشة {chat_id}: {e}")
-                await remove_chat_from_list(context, chat_id)
-                await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة (أو تم حذفها). تمت إزالتها من القائمة.")
-                return await refresh_current_list(update, context)
-
             await client.leave_chat(chat_id)
             logger.info(f"تمت المغادرة بنجاح من {chat_id}")
-
             await remove_chat_from_list(context, chat_id)
             await query.edit_message_text("✅ تمت المغادرة بنجاح.")
-
         except RPCError as e:
             logger.error(f"خطأ RPC أثناء مغادرة {chat_id}: {e}")
-            error_msg = str(e)
-            if "USER_NOT_PARTICIPANT" in error_msg:
+            err_str = str(e)
+            if "USER_NOT_PARTICIPANT" in err_str:
                 await remove_chat_from_list(context, chat_id)
                 await query.edit_message_text("⚠️ أنت لست عضوًا في هذه الدردشة. تمت إزالتها من القائمة.")
-            elif "CHAT_ID_INVALID" in error_msg:
+            elif "CHAT_ID_INVALID" in err_str:
                 await remove_chat_from_list(context, chat_id)
                 await query.edit_message_text("⚠️ معرف الدردشة غير صالح (ربما تم حذفها). تمت إزالتها من القائمة.")
             else:
                 await query.edit_message_text(f"❌ فشلت المغادرة: {e}")
-
         except Exception as e:
             logger.error(f"خطأ غير متوقع: {e}")
             await query.edit_message_text(f"❌ حدث خطأ غير متوقع: {e}")
-
         finally:
             await client.disconnect()
 
-        return await refresh_current_list(update, context)
+        # إعادة عرض القائمة المحدثة
+        if "channels_list" in context.user_data:
+            await show_channels_page(update, context)
+            return LIST_CHANNELS
+        elif "groups_list" in context.user_data:
+            await show_groups_page(update, context)
+            return LIST_GROUPS
+        else:
+            await query.edit_message_text("العودة للقسم", reply_markup=channel_section_keyboard())
+            return CHANNEL_SECTION
 
     if data == "back_to_channel_section":
         await query.edit_message_text("اختر العملية:", reply_markup=channel_section_keyboard())
@@ -779,7 +781,7 @@ async def auto_post_menu_handler(update: Update, context: ContextTypes.DEFAULT_T
                     groups.append((dialog.chat.id, dialog.chat.title or "بدون عنوان"))
             context.user_data["auto_groups_list"] = groups
             context.user_data["auto_groups_page"] = 0
-            # تحديد أي منها محدد مسبقاً (إن وجد)
+            # المجموعات المحددة مسبقاً
             selected = set(user_data.get("auto_post", {}).get("groups", []))
             context.user_data["auto_selected_groups"] = selected
             await show_auto_groups_page(update, context)
@@ -799,7 +801,7 @@ async def auto_post_menu_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "auto_set_interval":
         await query.edit_message_text(
-            "أرسل الفاصل الزمني بين كل رسالة (بالثواني، رقم فقط):\n"
+            "أرسل الفاصل الزمني بين كل دورة نشر (بالثواني، رقم فقط):\n"
             "لإلغاء الأمر أرسل /cancel"
         )
         return AUTO_POST_SET_INTERVAL
@@ -846,7 +848,6 @@ async def show_auto_groups_page(update: Update, context: ContextTypes.DEFAULT_TY
 
     keyboard = []
     for chat_id, title in page_groups:
-        # علامة ✓ إذا كانت محددة
         mark = "✅ " if chat_id in selected else ""
         btn_text = f"{mark}{title[:25]}..." if len(title) > 25 else f"{mark}{title}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"auto_toggle_group:{chat_id}")])
@@ -898,16 +899,48 @@ async def auto_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == "auto_save_groups":
         user_id = update.effective_user.id
         selected = context.user_data.get("auto_selected_groups", set())
-        # تحديث بيانات المستخدم
+
+        # التحقق من صلاحية المجموعات المختارة (اختياري للسلامة)
         user_data = get_user_session_data(user_id)
-        if user_data:
-            if "auto_post" not in user_data:
-                user_data["auto_post"] = {}
-            user_data["auto_post"]["groups"] = list(selected)
-            user_data["auto_post"]["enabled"] = False  # نوقف النشر عند تغيير المجموعات
-            save_sessions(user_sessions)
-            stop_auto_post(user_id)
-        await query.edit_message_text("✅ تم حفظ المجموعات.", reply_markup=auto_post_menu_keyboard(user_data))
+        if not user_data:
+            await query.edit_message_text("❌ حدث خطأ في استرجاع بيانات المستخدم.")
+            return AUTO_POST_MENU
+
+        api_id = user_data["api_id"]
+        api_hash = user_data["api_hash"]
+        session_str = user_data["session"]
+        client = await create_pyrogram_client(api_id, api_hash, session_str)
+        valid_groups = []
+        try:
+            await client.connect()
+            for chat_id in selected:
+                try:
+                    chat = await client.get_chat(chat_id)
+                    if chat and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+                        valid_groups.append(chat_id)
+                    else:
+                        logger.warning(f"المجموعة {chat_id} ليست من النوع المتوقع")
+                except Exception as e:
+                    logger.warning(f"المجموعة {chat_id} غير صالحة: {e}")
+        except Exception as e:
+            logger.error(f"خطأ في الاتصال أثناء التحقق: {e}")
+        finally:
+            await client.disconnect()
+
+        # تحديث بيانات المستخدم
+        if "auto_post" not in user_data:
+            user_data["auto_post"] = {}
+        user_data["auto_post"]["groups"] = valid_groups
+        user_data["auto_post"]["enabled"] = False  # إيقاف النشر عند تغيير المجموعات
+        save_sessions(user_sessions)
+        stop_auto_post(user_id)
+
+        invalid_count = len(selected) - len(valid_groups)
+        msg = f"✅ تم حفظ {len(valid_groups)} مجموعة صالحة."
+        if invalid_count > 0:
+            msg += f"\n⚠️ تم تجاهل {invalid_count} مجموعة غير صالحة (غير موجودة أو لست عضواً)."
+
+        await query.edit_message_text(msg, reply_markup=auto_post_menu_keyboard(user_data))
         return AUTO_POST_MENU
 
     elif data == "auto_back_to_menu":
@@ -928,7 +961,7 @@ async def auto_set_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if "auto_post" not in user_data:
             user_data["auto_post"] = {}
         user_data["auto_post"]["message"] = message
-        user_data["auto_post"]["enabled"] = False  # نوقف النشر عند تغيير الرسالة
+        user_data["auto_post"]["enabled"] = False
         save_sessions(user_sessions)
         stop_auto_post(user_id)
 
@@ -973,6 +1006,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ==================== التشغيل الرئيسي ====================
 def main() -> None:
+    """تشغيل البوت"""
     application = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
